@@ -97,42 +97,115 @@ serve(async (req: Request) => {
 
     // Handle callback queries (button clicks)
     if (payload.callback_query) {
-      const { data: message } = await supabaseClient
+      const callbackData = payload.callback_query.data;
+      const chatId = payload.callback_query.message.chat.id;
+      
+      console.log("Processing callback query:", callbackData, "from chat:", chatId);
+
+      // Store or update user information
+      if (payload.callback_query.from) {
+        const { id: telegram_user_id, username, first_name, last_name } = payload.callback_query.from;
+        
+        // Upsert user information
+        const { data: botUser, error: userError } = await supabaseClient
+          .from("bot_users")
+          .upsert({
+            bot_id: bot.id,
+            telegram_user_id,
+            username,
+            first_name,
+            last_name,
+            last_interaction_at: new Date().toISOString(),
+            is_bot_blocked: false,
+            is_closed: false,
+            user_id: bot.user_id
+          }, {
+            onConflict: 'bot_id,telegram_user_id'
+          })
+          .select()
+          .single();
+
+        if (userError) {
+          console.error("Error storing user information:", userError);
+        }
+      }
+
+      // Check if there are messages configured for this callback data
+      const { data: messages, error: messagesError } = await supabaseClient
         .from("messages")
-        .select("id, inline_keyboard")
+        .select("id, response_text, image_url, inline_keyboard, disable_web_page_preview, delay")
         .eq("bot_id", bot.id)
-        .single();
+        .eq("trigger", callbackData)
+        .order("order", { ascending: true });
 
-      if (message && message.inline_keyboard) {
-        // Find the clicked button
-        const buttons = message.inline_keyboard[0];
-        const clickedButton = buttons.find((btn: any) => 
-          btn.callback_data === payload.callback_query.data || 
-          btn.url === payload.callback_query.data
-        );
+      // Send response messages if found
+      if (!messagesError && messages?.length > 0) {
+        console.log(`Found ${messages.length} matching messages for callback data: ${callbackData}`);
+        
+        // Send each message with its custom delay
+        for (let i = 0; i < messages.length; i++) {
+          if (i > 0) {
+            // Use the delay from the previous message
+            const delay = messages[i - 1].delay || 3000;
+            await sleep(delay);
+          }
 
-        if (clickedButton?.url) {
-          // Get or create bot user
-          const { data: botUser } = await supabaseClient
-            .from("bot_users")
-            .select("id")
-            .eq("bot_id", bot.id)
-            .eq("telegram_user_id", payload.callback_query.from.id)
-            .single();
+          const message = messages[i];
 
-          if (botUser) {
-            // Record the link click
-            await supabaseClient
-              .from("link_clicks")
-              .insert({
-                bot_id: bot.id,
-                message_id: message.id,
-                bot_user_id: botUser.id,
-                url: clickedButton.url,
-                user_id: bot.user_id
-              });
+          try {
+            // Send image if available
+            if (message.image_url) {
+              const photoResponse = await fetch(
+                `https://api.telegram.org/bot${bot.telegram_token}/sendPhoto`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    photo: message.image_url,
+                    caption: message.response_text ? escapeMarkdownV2(message.response_text) : undefined,
+                    parse_mode: message.response_text ? "MarkdownV2" : undefined,
+                    reply_markup: message.inline_keyboard ? { inline_keyboard: message.inline_keyboard } : undefined,
+                    disable_web_page_preview: message.disable_web_page_preview
+                  })
+                }
+              );
+
+              if (!photoResponse.ok) {
+                const errorText = await photoResponse.text();
+                console.error("Telegram API error (photo):", errorText);
+                throw new Error(errorText);
+              }
+            }
+            // Send text message if no image
+            else if (message.response_text) {
+              const messageResponse = await fetch(
+                `https://api.telegram.org/bot${bot.telegram_token}/sendMessage`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: escapeMarkdownV2(message.response_text),
+                    parse_mode: "MarkdownV2",
+                    reply_markup: message.inline_keyboard ? { inline_keyboard: message.inline_keyboard } : undefined,
+                    disable_web_page_preview: message.disable_web_page_preview
+                  })
+                }
+              );
+
+              if (!messageResponse.ok) {
+                const errorText = await messageResponse.text();
+                console.error("Telegram API error (message):", errorText);
+                throw new Error(errorText);
+              }
+            }
+          } catch (error) {
+            console.error("Error sending callback response message:", error);
           }
         }
+      } else {
+        console.log("No messages found for callback data:", callbackData);
       }
 
       // Answer callback query to remove loading state
@@ -142,7 +215,8 @@ serve(async (req: Request) => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            callback_query_id: payload.callback_query.id
+            callback_query_id: payload.callback_query.id,
+            text: messages?.length > 0 ? undefined : "Action reçue !"
           })
         }
       );
