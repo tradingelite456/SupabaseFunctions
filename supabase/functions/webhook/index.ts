@@ -345,6 +345,28 @@ serve(async (req: Request) => {
 
     console.log(`Found ${messages.length} matching messages, sending responses`);
 
+    // Delete the user's command message after a short delay for a cleaner look
+    if (isTelegramCommand(messageText)) {
+      setTimeout(async () => {
+        try {
+          await fetch(
+            `https://api.telegram.org/bot${bot.telegram_token}/deleteMessage`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: chatId,
+                message_id: payload.message.message_id
+              })
+            }
+          );
+          console.log("Successfully deleted command message");
+        } catch (error) {
+          console.error("Error deleting command message:", error);
+        }
+      }, 3000); // Delete after 3 seconds
+    }
+
     // Send each message with its custom delay
     for (let i = 0; i < messages.length; i++) {
       if (i > 0) {
